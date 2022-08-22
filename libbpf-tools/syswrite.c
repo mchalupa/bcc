@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <assert.h>
 #include <regex.h>
+#include <sys/wait.h>
 #include <bpf/bpf.h>
 
 #include "syswrite.h"
@@ -20,7 +21,7 @@
 #define warn(...) fprintf(stderr, __VA_ARGS__)
 
 static void usage_and_exit(int ret) {
-    warn("Usage: syswrite shmkey name expr sig [name expr sig] ... -- program\n");
+    warn("Usage: syswrite shmkey name expr sig [name expr sig] ... -- [program arg1 arg2... | -p PID]\n");
     exit(ret);
 }
 
@@ -171,7 +172,6 @@ static void parse_line(bool iswrite, const struct event *e, char *line) {
     }
 }
 
-
 static int handle_event(void *ctx, void *data, size_t data_sz)
 {
     const struct event *e = data;
@@ -212,20 +212,36 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
 }
 
 static volatile sig_atomic_t running = 1;
+static volatile sig_atomic_t child_running = 1;
 
 void sig_int(int signo) {
     running = 0;
 }
 
+void sig_chld(int signo) {
+    child_running = 0;
+}
+
+int parse_args(int argc, char *argv[]) {
+    int i = 1;
+    for (; i < argc; ++i) {
+        if (strncmp(argv[i], "--", 3) == 0) {
+            break;
+        }
+    }
+    if (i == argc)
+        return -1;
+
+    exprs_num = (i - 2) / 3;
+    return i + 1;
+}
+
+static const int CAN_CONTINUE = 0xbee;
 
 int main(int argc, char *argv[])
 {
-    if (argc < 5 && (argc - 2) % 3 != 0) {
-        usage_and_exit(1);
-    }
-
-    exprs_num = (argc - 1) / 3;
-    if (exprs_num == 0) {
+    int prog_idx = parse_args(argc, argv);
+    if (prog_idx < 0 || exprs_num == 0) {
         usage_and_exit(1);
     }
 
@@ -268,6 +284,65 @@ int main(int argc, char *argv[])
     events = buffer_get_avail_events(shm, &events_num);
     free(control);
 
+    pid_t filter_pid = 0;
+    int fork_sync[2] = {-1, -1};
+    if (strncmp(argv[prog_idx], "-p", 3) == 0) {
+        if (argc <= prog_idx + 1) {
+            usage_and_exit(1);
+        }
+        if ((filter_pid = atoi(argv[prog_idx + 1])) < 0) {
+            usage_and_exit(1);
+        }
+    } else { /* spawn the program */
+        if (pipe(fork_sync) < 0) {
+            perror("pipe");
+            exit(1);
+        }
+
+        if (signal(SIGCHLD, sig_chld) == SIG_ERR) {
+            warn("can't set SIGCHLD handler: %s\n", strerror(errno));
+            goto cleanup_core;
+        }
+
+        filter_pid = fork();
+        if (filter_pid < 0) {
+            perror("fork");
+            exit(1);
+        }
+
+        if (filter_pid == 0) { /* child */
+            close(fork_sync[1]);
+            int val = 0;
+            while (val != CAN_CONTINUE) {
+                if (read(fork_sync[0], &val, sizeof(int)) < 0) {
+                    perror("syncing child process");
+                    exit(1);
+                }
+            }
+            char **nargv = malloc((argc - prog_idx) + 1);
+            assert(nargv && "Allocation failed");
+            int n = 0;
+            for (int i = prog_idx; i < argc; ++i) {
+                warn("  spawn arg %d: %s\n", n, argv[i]);
+                nargv[n++] = strdup(argv[i]);
+                assert(nargv[n-1] && "Allocation failed");
+            }
+            nargv[n] = 0;
+
+            if (execve(argv[prog_idx], nargv, NULL) < 0) {
+                perror("execve");
+                warn("Failed spawning the program...");
+                exit(1);
+            }
+            assert(0 && "Unreachable after execve");
+        }
+
+        warn("Spawned pid %d\n", filter_pid);
+
+        close(fork_sync[0]);
+    }
+
+
 	LIBBPF_OPTS(bpf_object_open_opts, open_opts);
 	struct syswrite_bpf *obj;
     int err;
@@ -298,15 +373,6 @@ int main(int argc, char *argv[])
 		goto cleanup_obj;
 	}
 
-    warn("info: waiting for the monitor to attach\n");
-    err = buffer_wait_for_monitor(shm);
-    if (err < 0) {
-        if (err != EINTR) {
-            warn("failed waiting: %s\n", strerror(-err));
-        }
-        goto cleanup_obj;
-    }
-
     obj->links.sys_write = bpf_program__attach(obj->progs.sys_write);
     if (!obj->links.sys_write) {
 		err = -errno;
@@ -320,13 +386,30 @@ int main(int argc, char *argv[])
         goto cleanup_obj;
     }
 
+    warn("info: waiting for the monitor to attach\n");
+    err = buffer_wait_for_monitor(shm);
+    if (err < 0) {
+        if (err != EINTR) {
+            warn("failed waiting: %s\n", strerror(-err));
+        }
+        goto cleanup_obj;
+    }
+
     if (signal(SIGINT, sig_int) == SIG_ERR) {
         warn("can't set signal handler: %s\n", strerror(errno));
         goto cleanup_obj;
     }
 
+    /* we spawned the process, signal it to run */
+    if (fork_sync[1] != -1) {
+        if (write(fork_sync[1], &CAN_CONTINUE, sizeof(CAN_CONTINUE)) != sizeof(CAN_CONTINUE)) {
+            perror("signaling child to continue");
+            goto cleanup_obj;
+        }
+    }
+
     printf("Tracing write syscalls...\n");
-    while (running) {
+    while (running && child_running) {
         err = ring_buffer__consume(buffer);
        //err = ring_buffer__poll(buffer,
        //                        100 /* timeout in ms */);
@@ -356,5 +439,5 @@ cleanup_core:
     warn("Destroying shared buffer\n");
     destroy_shared_buffer(shm);
 
-	return err != 0;
+    return 0;
 }
