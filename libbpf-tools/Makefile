@@ -1,4 +1,10 @@
 # SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
+SHAMON_PARENT := $(abspath ../../)
+SHAMON_DIR := $(SHAMON_PARENT)/shamon/
+SHAMON_LIBS := -L$(SHAMON_DIR)/core -L$(SHAMON_DIR)/shmbuf\
+               -lshamon-source -lshamon-shmbuf -lshamon-utils\
+	       -lshamon-signature
+
 OUTPUT := $(abspath .output)
 CLANG ?= clang
 LLVM_STRIP ?= llvm-strip
@@ -8,7 +14,7 @@ BPFTOOL ?= $(BPFTOOL_OUTPUT)/bootstrap/bpftool
 LIBBPF_SRC := $(abspath ../src/cc/libbpf/src)
 LIBBPF_OBJ := $(abspath $(OUTPUT)/libbpf.a)
 LIBBLAZESYM_SRC := $(abspath blazesym/target/release/libblazesym.a)
-INCLUDES := -I$(OUTPUT) -I../src/cc/libbpf/include/uapi
+INCLUDES := -I$(OUTPUT) -I../src/cc/libbpf/include/uapi -I$(SHAMON_PARENT)
 CFLAGS := -g -O2 -Wall
 BPFCFLAGS := -g -O2 -Wall
 INSTALL ?= install
@@ -75,6 +81,7 @@ APPS = \
 	solisten \
 	statsnoop \
 	syscount \
+	syswrite \
 	tcptracer \
 	tcpconnect \
 	tcpconnlat \
@@ -174,7 +181,7 @@ $(BPFTOOL): | $(BPFTOOL_OUTPUT)
 
 $(APPS): %: $(OUTPUT)/%.o $(LIBBPF_OBJ) $(COMMON_OBJ) | $(OUTPUT)
 	$(call msg,BINARY,$@)
-	$(Q)$(CC) $(CFLAGS) $^ $(LDFLAGS) -lelf -lz -o $@
+	$(Q)$(CC) $(CFLAGS) $^ $(LDFLAGS) -lelf -lz $(SHAMON_LIBS) -o $@
 
 ifeq ($(USE_BLAZESYM),1)
 $(patsubst %,$(OUTPUT)/%.o,$(BZ_APPS)): $(OUTPUT)/blazesym.h
