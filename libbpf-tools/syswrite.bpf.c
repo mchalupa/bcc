@@ -3,11 +3,12 @@
 //
 // Based on syscount(8) from BCC by Sasha Goldshtein
 #include <vmlinux.h>
-#include <bpf/bpf_helpers.h>
-#include <bpf/bpf_tracing.h>
-#include <bpf/bpf_core_read.h>
+
 #include "syswrite.h"
 #include "maps.bpf.h"
+#include <bpf/bpf_core_read.h>
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
 
 const volatile pid_t filter_pid = 0;
 size_t dropped = 0;
@@ -24,8 +25,9 @@ struct loop_data {
 };
 
 static long submit_events(u32 index, struct loop_data *ctx) {
-    size_t off = index*BUF_SIZE;
-    size_t len = ((ctx->count - off) > BUF_SIZE) ? BUF_SIZE : (ctx->count - off);
+    size_t off = index * BUF_SIZE;
+    size_t len =
+        ((ctx->count - off) > BUF_SIZE) ? BUF_SIZE : (ctx->count - off);
 
     struct event *event = bpf_ringbuf_reserve(&buffer, sizeof(struct event), 0);
     if (!event) {
@@ -80,22 +82,15 @@ int sys_write(struct trace_event_raw_sys_enter *ctx) {
     if (count == 0)
         return 0;
 
-    const char *user_buf = (void*)ctx->args[1];
+    const char *user_buf = (void *)ctx->args[1];
 
     bpf_printk("[PID %d] write(%d, %p, %lu).\n", pid, fd, user_buf, count);
 
-    struct loop_data data = {
-        .fd = fd,
-        .count = count,
-        .user_buf = user_buf
-    };
+    struct loop_data data = {.fd = fd, .count = count, .user_buf = user_buf};
 
-    bpf_loop((count / BUF_SIZE)+1, submit_events, &data, 0);
+    bpf_loop((count / BUF_SIZE) + 1, submit_events, &data, 0);
 
     return 0;
 }
-
-
-
 
 char LICENSE[] SEC("license") = "GPL";

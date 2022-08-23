@@ -1,27 +1,28 @@
-#include <unistd.h>
-#include <signal.h>
-#include <errno.h>
 #include <assert.h>
-#include <regex.h>
-#include <sys/wait.h>
 #include <bpf/bpf.h>
+#include <errno.h>
+#include <regex.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
+#include "btf_helpers.h"
+#include "errno_helpers.h"
 #include "syswrite.h"
 #include "syswrite.skel.h"
-#include "errno_helpers.h"
-#include "btf_helpers.h"
 #include "trace_helpers.h"
 
 #include "shamon/core/event.h"
-#include "shamon/core/source.h"
 #include "shamon/core/signatures.h"
+#include "shamon/core/source.h"
 #include "shamon/shmbuf/buffer.h"
 #include "shamon/shmbuf/client.h"
 
 #define warn(...) fprintf(stderr, __VA_ARGS__)
 
 static void usage_and_exit(int ret) {
-    warn("Usage: syswrite shmkey name expr sig [name expr sig] ... -- [program arg1 arg2... | -p PID]\n");
+    warn("Usage: syswrite shmkey name expr sig [name expr sig] ... -- [program "
+         "arg1 arg2... | -p PID]\n");
     exit(ret);
 }
 
@@ -38,12 +39,13 @@ static size_t current_line_alloc_len = 0;
 static size_t current_line_idx = 0;
 
 /*
-static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
+static int libbpf_print_fn(enum libbpf_print_level level, const char *format,
+va_list args)
 {
-	if (level == LIBBPF_DEBUG && !env.verbose)
-		return 0;
+    if (level == LIBBPF_DEBUG && !env.verbose)
+        return 0;
 
-	return vfprintf(stderr, format, args);
+    return vfprintf(stderr, format, args);
 }
 
 void bump_memlock_rlimit(void)
@@ -111,8 +113,8 @@ static void parse_line(bool iswrite, const struct event *e, char *line) {
             }
             if (*o != 'M') {
                 if ((int)matches[m].rm_so < 0) {
-                    warn("warning: have no match for '%c' in signature %s\n", *o,
-                         signatures[i]);
+                    warn("warning: have no match for '%c' in signature %s\n",
+                         *o, signatures[i]);
                     continue;
                 }
                 len = matches[m].rm_eo - matches[m].rm_so;
@@ -172,8 +174,7 @@ static void parse_line(bool iswrite, const struct event *e, char *line) {
     }
 }
 
-static int handle_event(void *ctx, void *data, size_t data_sz)
-{
+static int handle_event(void *ctx, void *data, size_t data_sz) {
     const struct event *e = data;
 
     if (e->len == -2) {
@@ -181,8 +182,9 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
         return 0;
     }
     /*
-    fprintf(stderr, "fd: %d, len: %d, off: %d, count: %d, str:\n\033[34m'%*s'\033[0m\n",
-            e->fd, e->len, e->off, e->count, e->len, e->buf);
+    fprintf(stderr, "fd: %d, len: %d, off: %d, count: %d,
+    str:\n\033[34m'%*s'\033[0m\n", e->fd, e->len, e->off, e->count, e->len,
+    e->buf);
             */
 
     for (size_t i = 0; i < e->len; ++i) {
@@ -238,8 +240,7 @@ int parse_args(int argc, char *argv[]) {
 
 static const int CAN_CONTINUE = 0xbee;
 
-int main(int argc, char *argv[])
-{
+int main(int argc, char *argv[]) {
     int prog_idx = parse_args(argc, argv);
     if (prog_idx < 0 || exprs_num == 0) {
         usage_and_exit(1);
@@ -249,8 +250,8 @@ int main(int argc, char *argv[])
     char *exprs[exprs_num];
     char *names[exprs_num];
 
-    signatures = malloc(sizeof(char*)*exprs_num);
-    re = malloc(exprs_num*sizeof(regex_t));
+    signatures = malloc(sizeof(char *) * exprs_num);
+    re = malloc(exprs_num * sizeof(regex_t));
 
     int arg_i = 2;
     for (int i = 0; i < (int)exprs_num; ++i) {
@@ -325,7 +326,7 @@ int main(int argc, char *argv[])
             for (int i = prog_idx; i < argc; ++i) {
                 warn("  spawn arg %d: %s\n", n, argv[i]);
                 nargv[n++] = strdup(argv[i]);
-                assert(nargv[n-1] && "Allocation failed");
+                assert(nargv[n - 1] && "Allocation failed");
             }
             nargv[n] = 0;
 
@@ -342,45 +343,46 @@ int main(int argc, char *argv[])
         close(fork_sync[0]);
     }
 
-
-	LIBBPF_OPTS(bpf_object_open_opts, open_opts);
-	struct syswrite_bpf *obj;
+    LIBBPF_OPTS(bpf_object_open_opts, open_opts);
+    struct syswrite_bpf *obj;
     int err;
 
-	libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
-    //libbpf_set_print(libbpf_print_fn);
+    libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
+    // libbpf_set_print(libbpf_print_fn);
 
-	err = ensure_core_btf(&open_opts);
-	if (err) {
-		fprintf(stderr, "failed to fetch necessary BTF for CO-RE: %s\n", strerror(-err));
-		return 1;
-	}
+    err = ensure_core_btf(&open_opts);
+    if (err) {
+        fprintf(stderr, "failed to fetch necessary BTF for CO-RE: %s\n",
+                strerror(-err));
+        return 1;
+    }
 
-	obj = syswrite_bpf__open_opts(&open_opts);
-	if (!obj) {
-		warn("failed to open BPF object\n");
-		err = 1;
+    obj = syswrite_bpf__open_opts(&open_opts);
+    if (!obj) {
+        warn("failed to open BPF object\n");
+        err = 1;
         goto cleanup_core;
-	}
+    }
 
     /*
-	if (env.pid)
-		obj->rodata->filter_pid = env.pid;
+    if (env.pid)
+        obj->rodata->filter_pid = env.pid;
     */
-	err = syswrite_bpf__load(obj);
-	if (err) {
-		warn("failed to load BPF object: %s\n", strerror(-err));
-		goto cleanup_obj;
-	}
+    err = syswrite_bpf__load(obj);
+    if (err) {
+        warn("failed to load BPF object: %s\n", strerror(-err));
+        goto cleanup_obj;
+    }
 
     obj->links.sys_write = bpf_program__attach(obj->progs.sys_write);
     if (!obj->links.sys_write) {
-		err = -errno;
+        err = -errno;
         warn("failed to attach sys_write program: %s\n", strerror(-err));
-		goto cleanup_obj;
-	}
+        goto cleanup_obj;
+    }
 
-    struct ring_buffer *buffer = ring_buffer__new(bpf_map__fd(obj->maps.buffer), handle_event, NULL, NULL);
+    struct ring_buffer *buffer = ring_buffer__new(bpf_map__fd(obj->maps.buffer),
+                                                  handle_event, NULL, NULL);
     if (!buffer) {
         warn("Failed to create ring buffer\n");
         goto cleanup_obj;
@@ -402,7 +404,8 @@ int main(int argc, char *argv[])
 
     /* we spawned the process, signal it to run */
     if (fork_sync[1] != -1) {
-        if (write(fork_sync[1], &CAN_CONTINUE, sizeof(CAN_CONTINUE)) != sizeof(CAN_CONTINUE)) {
+        if (write(fork_sync[1], &CAN_CONTINUE, sizeof(CAN_CONTINUE)) !=
+            sizeof(CAN_CONTINUE)) {
             perror("signaling child to continue");
             goto cleanup_obj;
         }
@@ -411,23 +414,23 @@ int main(int argc, char *argv[])
     printf("Tracing write syscalls...\n");
     while (running && child_running) {
         err = ring_buffer__consume(buffer);
-       //err = ring_buffer__poll(buffer,
-       //                        100 /* timeout in ms */);
+        // err = ring_buffer__poll(buffer,
+        //                         100 /* timeout in ms */);
         if (err < 0 && err != -EINTR) {
             perror("polling");
         }
-	}
+    }
 
     printf("Cleaning up...\n");
     ring_buffer__free(buffer);
 
 cleanup_obj:
-	syswrite_bpf__destroy(obj);
+    syswrite_bpf__destroy(obj);
 cleanup_core:
-	cleanup_core_btf(&open_opts);
+    cleanup_core_btf(&open_opts);
 
-    warn("info: sent %lu events, busy waited on buffer %lu cycles\n",
-          ev.id, waiting_for_buffer);
+    warn("info: sent %lu events, busy waited on buffer %lu cycles\n", ev.id,
+         waiting_for_buffer);
     for (int i = 0; i < (int)exprs_num; ++i) {
         regfree(&re[i]);
     }
