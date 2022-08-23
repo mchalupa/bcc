@@ -66,12 +66,11 @@ static long submit_events(u32 index, struct loop_data *ctx) {
 SEC("tracepoint/syscalls/sys_enter_write")
 int sys_write(struct trace_event_raw_sys_enter *ctx) {
     pid_t pid = bpf_get_current_pid_tgid() >> 32;
+    pid_t req_pid = filter_pid;
 
-    /*
-    if (pid != filter_pid) {
+    if (req_pid > 0 && pid != req_pid) {
         return 0;
     }
-    */
 
     int fd = ctx->args[0];
     if (fd != 1) {

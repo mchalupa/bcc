@@ -332,7 +332,7 @@ int main(int argc, char *argv[]) {
 
             if (execve(argv[prog_idx], nargv, NULL) < 0) {
                 perror("execve");
-                warn("Failed spawning the program...");
+                warn("\033[31mFailed spawning the program...\033[0m\n");
                 exit(1);
             }
             assert(0 && "Unreachable after execve");
@@ -364,10 +364,10 @@ int main(int argc, char *argv[]) {
         goto cleanup_core;
     }
 
-    /*
-    if (env.pid)
-        obj->rodata->filter_pid = env.pid;
-    */
+
+    if (filter_pid > 0)
+        obj->rodata->filter_pid = filter_pid;
+
     err = syswrite_bpf__load(obj);
     if (err) {
         warn("failed to load BPF object: %s\n", strerror(-err));
