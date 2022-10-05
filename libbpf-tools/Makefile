@@ -71,6 +71,7 @@ APPS = \
 	offcputime \
 	oomkill \
 	readahead \
+	readwrite\
 	runqlat \
 	runqlen \
 	runqslower \
