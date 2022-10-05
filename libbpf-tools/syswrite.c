@@ -4,6 +4,7 @@
 #include <regex.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "btf_helpers.h"
@@ -277,11 +278,13 @@ int main(int argc, char *argv[]) {
         exprs_num, (const char **)names, (const char **)signatures);
     assert(control);
 
-    size_t max_size = source_control_max_event_size(control);
-    if (max_size < sizeof(shm_event_dropped))
-        max_size = sizeof(shm_event_dropped);
-    shm = create_shared_buffer(shmkey, max_size, control);
+    /* set umask so that the newly created buffers actually got the 0707 permissions */
+    /* FIXME: still does not work with aux buffers... */
+    mode_t old_mask = umask(0020);
+    shm = create_shared_buffer_adv(shmkey, 0707, 0, control);
+    /* create the shared buffer */
     assert(shm);
+
     events = buffer_get_avail_events(shm, &events_num);
     free(control);
 
@@ -312,6 +315,9 @@ int main(int argc, char *argv[]) {
         }
 
         if (filter_pid == 0) { /* child */
+            /* reset back the umask */
+            umask(old_mask);
+
             close(fork_sync[1]);
             int val = 0;
             while (val != CAN_CONTINUE) {
@@ -388,7 +394,7 @@ int main(int argc, char *argv[]) {
         goto cleanup_obj;
     }
 
-    warn("info: waiting for the monitor to attach\n");
+    warn("info: waiting for the monitor to attach... ");
     err = buffer_wait_for_monitor(shm);
     if (err < 0) {
         if (err != EINTR) {
@@ -396,6 +402,7 @@ int main(int argc, char *argv[]) {
         }
         goto cleanup_obj;
     }
+    warn("done\n");
 
     if (signal(SIGINT, sig_int) == SIG_ERR) {
         warn("can't set signal handler: %s\n", strerror(errno));
@@ -403,6 +410,7 @@ int main(int argc, char *argv[]) {
     }
 
     /* we spawned the process, signal it to run */
+    warn("Signaling spawned process to continue\n");
     if (fork_sync[1] != -1) {
         if (write(fork_sync[1], &CAN_CONTINUE, sizeof(CAN_CONTINUE)) !=
             sizeof(CAN_CONTINUE)) {

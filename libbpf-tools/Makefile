@@ -2,8 +2,7 @@
 SHAMON_PARENT := $(abspath ../../)
 SHAMON_DIR := $(SHAMON_PARENT)/shamon/
 SHAMON_LIBS := -L$(SHAMON_DIR)/core -L$(SHAMON_DIR)/shmbuf\
-               -lshamon-source -lshamon-shmbuf -lshamon-utils\
-	       -lshamon-signature
+               -lshamon-shmbuf -lshamon-utils -lshamon-signature
 
 OUTPUT := $(abspath .output)
 CLANG ?= clang

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
-// Copyright (c) 2020 Anton Protopopov
+// Copyright (c) 2022 Marek Chalupa, ISTA
 //
-// Based on syscount(8) from BCC by Sasha Goldshtein
+// Based on syscount from Anton Protopopov
 #include <vmlinux.h>
 
 #include "syswrite.h"
@@ -31,7 +31,7 @@ static long submit_events(u32 index, struct loop_data *ctx) {
 
     struct event *event = bpf_ringbuf_reserve(&buffer, sizeof(struct event), 0);
     if (!event) {
-        bpf_printk("FAILED RESERVING SLOT IN BUFFER");
+        bpf_printk("Failed reserving a slot in the buffer");
         ++dropped;
         return 1;
     } else {
@@ -48,7 +48,7 @@ static long submit_events(u32 index, struct loop_data *ctx) {
 
     int ret = bpf_probe_read_user(event->buf, len, ctx->user_buf + off);
     if (ret != 0) {
-        bpf_printk("FAILED READING USER STRING");
+        bpf_printk("Failed reading user string");
         bpf_ringbuf_discard(event, 0);
         ++dropped;
         return 1;
@@ -83,7 +83,7 @@ int sys_write(struct trace_event_raw_sys_enter *ctx) {
 
     const char *user_buf = (void *)ctx->args[1];
 
-    bpf_printk("[PID %d] write(%d, %p, %lu).\n", pid, fd, user_buf, count);
+    /* bpf_printk("[PID %d] write(%d, %p, %lu).\n", pid, fd, user_buf, count); */
 
     struct loop_data data = {.fd = fd, .count = count, .user_buf = user_buf};
 
