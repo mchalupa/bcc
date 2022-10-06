@@ -37,6 +37,8 @@ static char *current_line = NULL;
 static size_t current_line_alloc_len = 0;
 static size_t current_line_idx = 0;
 
+FILE *logfile;
+
 /*
 static int libbpf_print_fn(enum libbpf_print_level level, const char *format,
 va_list args)
@@ -87,7 +89,9 @@ static void parse_line(const struct event *e, char *line) {
     ssize_t len;
     regmatch_t matches[MAXMATCH + 1];
 
-    /* fprintf(stderr, "LINE: %s\n", line); */
+    fprintf(logfile, "fd: %d, len: %d, off: %d, count: %d, line:\n\'%*s'\n",
+            e->fd, e->len, e->off, e->count, e->len, line);
+    fflush(logfile);
 
     int num = (int)exprs_num[fd];
     struct buffer *shm = shmbuf[fd];
@@ -111,6 +115,8 @@ static void parse_line(const struct event *e, char *line) {
         /* push the base info about event */
         ++ev->id;
         addr = buffer_partial_push(shm, addr, ev, sizeof(*ev));
+
+	fprintf(logfile, "match\n");
 
         /* push the arguments of the event */
         for (const char *o = signatures[fd][i]; *o && m <= MAXMATCH; ++o, ++m) {
@@ -186,12 +192,13 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
 
     if (e->len == -2) {
         fprintf(stderr, "\033[31mDROPPED %d\033[0m\n", e->count);
+        fprintf(logfile, "\033[31mDROPPED %d\033[0m\n", e->count);
+	fflush(logfile);
         return 0;
     }
-    /*
-    fprintf(stderr, "fd: %d, len: %d, off: %d, count: %d, str:\n\033[34m'%*s'\033[0m\n",
+    fprintf(logfile, "fd: %d, len: %d, off: %d, count: %d, str:\n\033[34m'%*s'\033[0m\n",
             e->fd, e->len, e->off, e->count, e->len, e->buf);
-            */
+    fflush(logfile);
 
     for (size_t i = 0; i < e->len; ++i) {
         if (current_line_idx >= current_line_alloc_len) {
@@ -258,6 +265,11 @@ int parse_args(int argc, char *argv[],
         names[cur_fd][arg_i]      = argv[i++];
         exprs[cur_fd][arg_i]      = argv[i++];
         signatures[cur_fd][arg_i] = argv[i];
+
+	fprintf(logfile, "[fd %d]: %s %s %s\n", cur_fd,
+			names[cur_fd][arg_i],
+			exprs[cur_fd][arg_i],
+			signatures[cur_fd][arg_i]);
 
         /* compile the regex, use extended RE */
         int status = regcomp(&re[cur_fd][arg_i], exprs[cur_fd][arg_i], REG_EXTENDED);
@@ -407,6 +419,13 @@ static int attach_programs(struct readwrite_bpf *obj)
         return -1;
     }
 
+    obj->links.sys_enter_execve = bpf_program__attach(obj->progs.sys_enter_execve);
+    if (!obj->links.sys_enter_execve) {
+        err = -errno;
+        warn("failed to attach sys_enter_execve program: %s\n", strerror(-err));
+        return -1;
+    }
+
     return 0;
 }
 
@@ -437,10 +456,15 @@ int main(int argc, char *argv[]) {
         assert(re[i]);
     }
 
+    logfile = fopen("/tmp/logfile.txt", "w");
+
     int prog_args_idx = parse_args(argc, argv, exprs, names);
     if (prog_args_idx < 0 ) {
         usage_and_exit(1);
     }
+
+    fprintf(logfile, "-- parsed args --\n");
+    fflush(logfile);
 
     /* set umask so that the newly created buffers actually got the 0707 permissions */
     /* FIXME: still does not work with aux buffers... */
@@ -476,6 +500,9 @@ int main(int argc, char *argv[]) {
         free(control);
     }
 
+    fprintf(logfile, "-- created buffers --\n");
+    fflush(logfile);
+
     /* Spawn or attach the program */
     pid_t filter_pid = 0;
     int fork_sync[2] = {-1, -1};
@@ -493,6 +520,9 @@ int main(int argc, char *argv[]) {
             goto cleanup_shm;
         }
     }
+
+    fprintf(logfile, "-- spawned progam --\n");
+    fflush(logfile);
 
     LIBBPF_OPTS(bpf_object_open_opts, open_opts);
     struct readwrite_bpf *obj;
@@ -516,13 +546,19 @@ int main(int argc, char *argv[]) {
     }
 
     info("eBPF: tracing pid %d, fd mask: %d\n", filter_pid, filter_fd_mask);
-    if (filter_pid > 0)
-        obj->rodata->filter_pid = filter_pid;
     obj->rodata->filter_fd_mask = filter_fd_mask;
 
     err = readwrite_bpf__load(obj);
     if (err) {
         warn("failed to load BPF object: %s\n", strerror(-err));
+        goto cleanup_obj;
+    }
+
+    /* set the program's pid to start with */
+    int one = 1;
+    int pids_map_fd = bpf_map__fd(obj->maps.filter_pids);
+    if (bpf_map_update_elem(pids_map_fd, &filter_pid, &one, BPF_ANY)) {
+        warn("failed inserting pid into the traced set");
         goto cleanup_obj;
     }
 
@@ -566,10 +602,17 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    fprintf(logfile, "-- entering main loop --\n");
+    fflush(logfile);
+
     info("Entering the main loop...\n");
     size_t spinned = 0;
     while (running && child_running) {
         err = ring_buffer__consume(buffer);
+    fprintf(logfile, "event recv: %d\n", err);
+    fflush(logfile);
+
+
         if (err == 0) {
             if (++spinned > 1000) {
                 err = ring_buffer__poll(buffer, 10 /* timeout in ms */);
@@ -609,6 +652,7 @@ cleanup_shm:
 
     free(tmpline);
     free(current_line);
+    fclose(logfile);
 
     return 0;
 }

@@ -10,13 +10,20 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 
-const volatile pid_t filter_pid = 0;
 const volatile int filter_fd_mask = 0;
 size_t dropped = 0;
 
+#define MAX_TRACED_PROCS 1000
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 1);
+    __uint(max_entries, MAX_TRACED_PROCS);
+    __type(key, u32);
+    __type(value, u32);
+} filter_pids SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, MAX_TRACED_PROCS);
     __type(key, u32);
     __type(value, struct syscall_data);
 } syscall_data SEC(".maps");
@@ -79,12 +86,27 @@ static long submit_events(u32 index, struct loop_data *ctx) {
     }
 }
 
+static inline int trace_pid(pid_t p) {
+    u32 *known = bpf_map_lookup_elem(&filter_pids, &p);
+    if (known && *known == 1)
+        return 1;
+    return 0;
+}
+
+static inline void add_pid(pid_t pid) {
+    u32 one = 1;
+    if (bpf_map_update_elem(&filter_pids, &pid, &one, BPF_ANY) != 0) {
+        bpf_printk("failed adding pid to traced set");
+    } else {
+        bpf_printk("added pid %d to traced set", pid);
+    }
+}
+
 SEC("tracepoint/syscalls/sys_enter_write")
 int sys_enter_write(struct trace_event_raw_sys_enter *ctx) {
     pid_t pid = bpf_get_current_pid_tgid() >> 32;
-    pid_t req_pid = filter_pid;
 
-    if (req_pid > 0 && pid != req_pid) {
+    if (!trace_pid(pid)) {
         return 0;
     }
 
@@ -104,9 +126,8 @@ int sys_enter_write(struct trace_event_raw_sys_enter *ctx) {
 SEC("tracepoint/syscalls/sys_exit_write")
 int sys_exit_write(struct trace_event_raw_sys_exit *ctx) {
     pid_t pid = bpf_get_current_pid_tgid() >> 32;
-    pid_t req_pid = filter_pid;
 
-    if (req_pid > 0 && pid != req_pid) {
+    if (!trace_pid(pid)) {
         return 0;
     }
 
@@ -143,9 +164,8 @@ int sys_exit_write(struct trace_event_raw_sys_exit *ctx) {
 SEC("tracepoint/syscalls/sys_enter_read")
 int sys_enter_read(struct trace_event_raw_sys_enter *ctx) {
     pid_t pid = bpf_get_current_pid_tgid() >> 32;
-    pid_t req_pid = filter_pid;
 
-    if (req_pid > 0 && pid != req_pid) {
+    if (!trace_pid(pid)) {
         return 0;
     }
 
@@ -164,9 +184,8 @@ int sys_enter_read(struct trace_event_raw_sys_enter *ctx) {
 SEC("tracepoint/syscalls/sys_exit_read")
 int sys_exit_read(struct trace_event_raw_sys_exit *ctx) {
     pid_t pid = bpf_get_current_pid_tgid() >> 32;
-    pid_t req_pid = filter_pid;
 
-    if (req_pid > 0 && pid != req_pid) {
+    if (!trace_pid(pid)) {
         return 0;
     }
 
@@ -199,5 +218,32 @@ int sys_exit_read(struct trace_event_raw_sys_exit *ctx) {
 
     return 0;
 }
+
+
+/*
+ * Tracing forks does not work... Dunno why.
+ * Trace at least processes that follow fork->exec pattern,
+ * that would be most of them. */
+SEC("tracepoint/syscalls/sys_enter_execve")
+int sys_enter_execve(struct trace_event_raw_sys_enter* ctx)
+{
+    u64 id = bpf_get_current_pid_tgid();
+    pid_t pid = (pid_t)id;
+    pid_t tgid = id >> 32;
+
+    struct task_struct *task = (struct task_struct*)bpf_get_current_task();
+    pid_t ppid = (pid_t)BPF_CORE_READ(task, real_parent, tgid);
+
+    /* bpf_printk("Execve in pid %d with ppid %d", pid, ppid); */
+
+    if (trace_pid(ppid)) {
+        /* pid is a child of some process that we trace */
+        add_pid(pid);
+    }
+
+    return 0;
+}
+
+/* TODO: delete the PID from the map if the process exits */
 
 char LICENSE[] SEC("license") = "GPL";
