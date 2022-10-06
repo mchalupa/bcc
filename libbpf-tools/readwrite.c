@@ -30,12 +30,12 @@ static void usage_and_exit(int ret) {
 
 #define MAXMATCH 20
 
-static char *tmpline = NULL;
-static size_t tmpline_len = 0;
+static char *tmpline;
+static size_t tmpline_len;
 
-static char *current_line = NULL;
-static size_t current_line_alloc_len = 0;
-static size_t current_line_idx = 0;
+static char *current_line[3];
+static size_t current_line_alloc_len[3];
+static size_t current_line_idx[3];
 
 bool first_match_only = true;
 
@@ -196,27 +196,29 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
             e->fd, e->len, e->off, e->count, e->len, e->buf);
 	    */
 
+    int fd = e->fd;
+
     for (size_t i = 0; i < e->len; ++i) {
-        if (current_line_idx >= current_line_alloc_len) {
-            current_line_alloc_len += line_alloc_size(e->len);
-            current_line = realloc(current_line, current_line_alloc_len);
-            assert(current_line && "Allocation failed");
+        if (current_line_idx[fd] >= current_line_alloc_len[fd]) {
+            current_line_alloc_len[fd] += line_alloc_size(e->len);
+            current_line[fd] = realloc(current_line[fd], current_line_alloc_len[fd]);
+            assert(current_line[fd] && "Allocation failed");
         }
 
         char c = e->buf[i];
         if (c == '\n' || c == '\0') {
             /* temporary end */
-            assert(current_line_idx < current_line_alloc_len);
-            current_line[current_line_idx] = '\0';
+            assert(current_line_idx[fd] < current_line_alloc_len[fd]);
+            current_line[fd][current_line_idx[fd]] = '\0';
             /* start new line */
-            current_line_idx = 0;
+            current_line_idx[fd] = 0;
 
-            parse_line(e, current_line);
+            parse_line(e, current_line[fd]);
             continue;
         }
 
-        assert(current_line_idx < current_line_alloc_len);
-        current_line[current_line_idx++] = c;
+        assert(current_line_idx[fd] < current_line_alloc_len[fd]);
+        current_line[fd][current_line_idx[fd]++] = c;
     }
 
     return 0;
@@ -619,13 +621,14 @@ cleanup_shm:
         free(signatures[fd]);
         free(re[fd]);
 
+        free(current_line[fd]);
+
         if (shmbuf[fd]) {
             destroy_shared_buffer(shmbuf[fd]);
         }
     }
 
     free(tmpline);
-    free(current_line);
 
     return 0;
 }
