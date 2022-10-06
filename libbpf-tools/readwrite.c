@@ -29,9 +29,6 @@ static void usage_and_exit(int ret) {
 
 #define MAXMATCH 20
 
-static size_t exprs_num;
-static size_t events_num;
-
 static char *tmpline = NULL;
 static size_t tmpline_len = 0;
 
@@ -71,15 +68,19 @@ static size_t line_alloc_size(size_t x) {
     return n;
 }
 
-static regex_t *re;
-static char **signatures;
-struct event_record *events;
-static size_t waiting_for_buffer;
-static shm_event ev;
+static size_t exprs_num[3];
+static regex_t *re[3];
+static char **signatures[3];
+struct event_record *events[3];
+static size_t waiting_for_buffer[3];
+static shm_event evs[3];
 
-static struct buffer *shm;
+static struct buffer *shmbuf[3];
 
 static void parse_line(const struct event *e, char *line) {
+    int fd = e->fd;
+    assert(fd >= 0 && fd < 3);
+
     int status;
     signature_operand op;
     ssize_t len;
@@ -87,11 +88,16 @@ static void parse_line(const struct event *e, char *line) {
 
     /* fprintf(stderr, "LINE: %s\n", line); */
 
-    for (int i = 0; i < (int)exprs_num; ++i) {
-        if (events[i].kind == 0)
-            continue; /* monitor is not interested in this */
+    int num = (int)exprs_num[fd];
+    struct buffer *shm = shmbuf[fd];
 
-        status = regexec(&re[i], line, MAXMATCH, matches, 0);
+    shm_event *ev = &evs[fd];
+    for (int i = 0; i < num; ++i) {
+        if ((ev->kind = events[fd][i].kind) == 0) {
+            continue; /* monitor is not interested in this */
+        }
+
+        status = regexec(&re[fd][i], line, MAXMATCH, matches, 0);
         if (status != 0) {
             continue;
         }
@@ -99,23 +105,22 @@ static void parse_line(const struct event *e, char *line) {
         void *addr;
 
         while (!(addr = buffer_start_push(shm))) {
-            ++waiting_for_buffer;
+            ++waiting_for_buffer[fd];
         }
         /* push the base info about event */
-        ++ev.id;
-        ev.kind = events[i].kind;
-        addr = buffer_partial_push(shm, addr, &ev, sizeof(ev));
+        ++ev->id;
+        addr = buffer_partial_push(shm, addr, ev, sizeof(*ev));
 
         /* push the arguments of the event */
-        for (const char *o = signatures[i]; *o && m <= MAXMATCH; ++o, ++m) {
+        for (const char *o = signatures[fd][i]; *o && m <= MAXMATCH; ++o, ++m) {
             if (*o == 'L') { /* user wants the whole line */
-                addr = buffer_partial_push_str(shm, addr, ev.id, line);
+                addr = buffer_partial_push_str(shm, addr, ev->id, line);
                 continue;
             }
             if (*o != 'M') {
                 if ((int)matches[m].rm_so < 0) {
                     warn("warning: have no match for '%c' in signature %s\n",
-                         *o, signatures[i]);
+                         *o, signatures[fd][i]);
                     continue;
                 }
                 len = matches[m].rm_eo - matches[m].rm_so;
@@ -135,7 +140,7 @@ static void parse_line(const struct event *e, char *line) {
                 assert(matches[0].rm_so >= 0);
                 strncpy(tmpline, line + matches[0].rm_so, len);
                 tmpline[len] = '\0';
-                addr = buffer_partial_push_str(shm, addr, ev.id, tmpline);
+                addr = buffer_partial_push_str(shm, addr, ev->id, tmpline);
                 continue;
             } else {
                 strncpy(tmpline, line + matches[m].rm_so, len);
@@ -165,7 +170,7 @@ static void parse_line(const struct event *e, char *line) {
                 addr = buffer_partial_push(shm, addr, &op.d, sizeof(op.d));
                 break;
             case 'S':
-                addr = buffer_partial_push_str(shm, addr, ev.id, tmpline);
+                addr = buffer_partial_push_str(shm, addr, ev->id, tmpline);
                 break;
             default:
                 assert(0 && "Invalid signature");
@@ -224,18 +229,91 @@ void sig_chld(int signo) {
     child_running = 0;
 }
 
-int parse_args(int argc, char *argv[]) {
-    int i = 1;
+int parse_args(int argc, char *argv[],
+               char **exprs[3],
+               char **names[3]) {
+
+    int arg_i, cur_fd = 1;
+    int args_i[3] = {0, 0, 0};
+    unsigned i = 2;
     for (; i < argc; ++i) {
-        if (strncmp(argv[i], "--", 3) == 0) {
+        if (strncmp(argv[i], "--", 3) == 0)
             break;
+        if (strncmp(argv[i], "-stdin", 7) == 0) {
+            cur_fd = 0;
+            continue;
+        }
+        if (strncmp(argv[i], "-stdout", 7) == 0) {
+            cur_fd = 1;
+            continue;
+        }
+        if (strncmp(argv[i], "-stderr", 7) == 0) {
+            cur_fd = 2;
+            continue;
+        }
+
+        /* this is the begining of event def */
+        arg_i = args_i[cur_fd];
+        names[cur_fd][arg_i]      = argv[i++];
+        exprs[cur_fd][arg_i]      = argv[i++];
+        signatures[cur_fd][arg_i] = argv[i];
+
+        /* compile the regex, use extended RE */
+        int status = regcomp(&re[cur_fd][arg_i], exprs[cur_fd][arg_i], REG_EXTENDED);
+        if (status != 0) {
+            warn("Failed compiling regex '%s'\n", exprs[cur_fd][arg_i]);
+            for (unsigned tmp = 0; tmp < arg_i; ++tmp) {
+                regfree(&re[cur_fd][tmp]);
+            }
+            return -1;
+        }
+
+        ++args_i[cur_fd];
+    }
+
+    assert(exprs_num[0] == args_i[0]);
+    assert(exprs_num[1] == args_i[1]);
+    assert(exprs_num[2] == args_i[2]);
+    assert(i < argc);
+
+    return i + 1;
+}
+
+static const char *fd_to_name(int i) {
+   return (i == 0 ? "stdin" : (i == 1 ? "stdout" : "stderr"));
+}
+
+int get_exprs_num(int argc, char *argv[]) {
+    int n = 0;
+    int cur_fd = 1;
+
+    for (unsigned i = 2; i < argc; ++i) {
+        if (strncmp(argv[i], "--", 3) == 0)
+            break;
+        if (strncmp(argv[i], "-stdin", 7) == 0) {
+            cur_fd = 0;
+            continue;
+        }
+        if (strncmp(argv[i], "-stdout", 7) == 0) {
+            cur_fd = 1;
+            continue;
+        }
+        if (strncmp(argv[i], "-stderr", 7) == 0) {
+            cur_fd = 2;
+            continue;
+        }
+
+        /* this must be the event name */
+        ++n;
+        ++exprs_num[cur_fd];
+        i += 2; /* skip regex and signature */
+        if (i >= argc) {
+            warn("Invalid number of arguments");
+            return -1;
         }
     }
-    if (i == argc)
-        return -1;
 
-    exprs_num = (i - 2) / 3;
-    return i + 1;
+    return n;
 }
 
 static const int CAN_CONTINUE = 0xbee;
@@ -332,52 +410,65 @@ static int attach_programs(struct readwrite_bpf *obj)
 }
 
 int main(int argc, char *argv[]) {
-    int prog_args_idx = parse_args(argc, argv);
-    if (prog_args_idx < 0 || exprs_num == 0) {
+    if (argc < 6) {
         usage_and_exit(1);
     }
 
     const char *shmkey = argv[1];
-    char *exprs[exprs_num];
-    char *names[exprs_num];
-
-    signatures = malloc(sizeof(char *) * exprs_num);
-    re = malloc(exprs_num * sizeof(regex_t));
-
-    int arg_i = 2;
-    for (int i = 0; i < (int)exprs_num; ++i) {
-        names[i] = (char *)argv[arg_i++];
-        exprs[i] = (char *)argv[arg_i++];
-        if (arg_i >= argc) {
-            warn("Missing a signature for '%s'\n", exprs[i]);
-            usage_and_exit(1);
-        }
-        signatures[i] = (char *)argv[arg_i++];
-
-        /* compile the regex, use extended RE */
-        int status = regcomp(&re[i], exprs[i], REG_EXTENDED);
-        if (status != 0) {
-            warn("Failed compiling regex '%s'\n", exprs[i]);
-            /* FIXME: we leak the expressions compiled so far ... */
-            exit(1);
-        }
+    if (shmkey[0] != '/') {
+        usage_and_exit(1);
     }
 
-    /* Initialize the info about this source */
-    struct source_control *control = source_control_define_pairwise(
-        exprs_num, (const char **)names, (const char **)signatures);
-    assert(control);
+    if (get_exprs_num(argc, argv) <= 0) {
+        usage_and_exit(1);
+    }
+
+    char **exprs[3];
+    char **names[3];
+    for (int i = 0; i < 3; ++i) {
+        exprs[i] = malloc(exprs_num[i]*sizeof(char *));
+        assert(exprs[i]);
+        names[i] = malloc(exprs_num[i]*sizeof(char *));
+        assert(names[i]);
+        signatures[i] = malloc(exprs_num[i]*sizeof(char *));
+        assert(signatures[i]);
+        re[i] = malloc(exprs_num[i]*sizeof(regex_t));
+        assert(re[i]);
+    }
+
+    int prog_args_idx = parse_args(argc, argv, exprs, names);
+    if (prog_args_idx < 0 ) {
+        usage_and_exit(1);
+    }
 
     /* set umask so that the newly created buffers actually got the 0707 permissions */
     /* FIXME: still does not work with aux buffers... */
     mode_t old_mask = umask(0020);
-    shm = create_shared_buffer_adv(shmkey, 0707, 0, control);
-    /* create the shared buffer */
-    assert(shm);
+    char extended_shmkey[256];
 
-    events = buffer_get_avail_events(shm, &events_num);
-    free(control);
+    /* Create shared memory buffers */
+    for (int i = 0; i < 3; ++i) {
+        /* Initialize the info about this source */
+        struct source_control *control = source_control_define_pairwise(
+            exprs_num[i], (const char **)names[i], (const char **)signatures[i]);
+        assert(control);
 
+        int ret = snprintf(extended_shmkey, 256, "%s.%s", shmkey, fd_to_name(i));
+        if (ret < 0 || ret >= 256) {
+            warn("ERROR: SHM key is too long\n");
+            goto cleanup_shm;
+        }
+
+        shmbuf[i] = create_shared_buffer_adv(extended_shmkey, 0707, 0, control);
+        /* create the shared buffer */
+        assert(shmbuf[i]);
+
+        size_t events_num;
+        events[i] = buffer_get_avail_events(shmbuf[i], &events_num);
+        free(control);
+    }
+
+    /* Spawn or attach the program */
     pid_t filter_pid = 0;
     int fork_sync[2] = {-1, -1};
     if (strncmp(argv[prog_args_idx], "-p", 3) == 0) {
@@ -437,7 +528,7 @@ int main(int argc, char *argv[]) {
     }
 
     warn("info: waiting for the monitor to attach... ");
-    err = buffer_wait_for_monitor(shm);
+    err = buffer_wait_for_monitor(shmbuf[0]);
     if (err < 0) {
         if (err != EINTR) {
             warn("failed waiting: %s\n", strerror(-err));
@@ -479,18 +570,23 @@ cleanup_obj:
 cleanup_core:
     cleanup_core_btf(&open_opts);
 cleanup_shm:
-    warn("info: sent %lu events, busy waited on buffer %lu cycles\n", ev.id,
-         waiting_for_buffer);
-    for (int i = 0; i < (int)exprs_num; ++i) {
-        regfree(&re[i]);
+    warn("Destroying shared buffers\n");
+    for (unsigned fd = 0; fd < 3; ++fd) {
+        warn("[fd %d] info: sent %lu events, busy waited on buffer %lu cycles\n",
+             fd, evs[fd].id, waiting_for_buffer[fd]);
+        for (int i = 0; i < (int)exprs_num[fd]; ++i) {
+            regfree(&re[fd][i]);
+        }
+        free(exprs[fd]);
+        free(names[fd]);
+        free(signatures[fd]);
+        free(re[fd]);
+
+        destroy_shared_buffer(shmbuf[fd]);
     }
+
     free(tmpline);
     free(current_line);
-    free(signatures);
-    free(re);
-
-    warn("Destroying shared buffer\n");
-    destroy_shared_buffer(shm);
 
     return 0;
 }
