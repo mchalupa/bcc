@@ -6,6 +6,12 @@ enum syscalls {
         SYSCALL_READ  = 2,
 };
 
+struct syscall_data {
+    int fd;
+    int count;
+    const char *buf;
+};
+
 #define BUF_SIZE 255
 
 struct event {

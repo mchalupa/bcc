@@ -79,7 +79,7 @@ static shm_event ev;
 
 static struct buffer *shm;
 
-static void parse_line(bool iswrite, const struct event *e, char *line) {
+static void parse_line(const struct event *e, char *line) {
     int status;
     signature_operand op;
     ssize_t len;
@@ -202,7 +202,7 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
             /* start new line */
             current_line_idx = 0;
 
-            parse_line(true, e, current_line);
+            parse_line(e, current_line);
             continue;
         }
 
@@ -294,6 +294,41 @@ pid_t spawn_program(int argc, char *argv[], int fork_sync[2],
 
     close(fork_sync[0]);
     return filter_pid;
+}
+
+static int attach_programs(struct readwrite_bpf *obj)
+{
+    int err;
+
+    obj->links.sys_enter_write = bpf_program__attach(obj->progs.sys_enter_write);
+    if (!obj->links.sys_enter_write) {
+        err = -errno;
+        warn("failed to attach sys_enter_write program: %s\n", strerror(-err));
+        return -1;
+    }
+
+    obj->links.sys_exit_write = bpf_program__attach(obj->progs.sys_exit_write);
+    if (!obj->links.sys_exit_write) {
+        err = -errno;
+        warn("failed to attach sys_exit_write program: %s\n", strerror(-err));
+        return -1;
+    }
+
+    obj->links.sys_enter_read = bpf_program__attach(obj->progs.sys_enter_read);
+    if (!obj->links.sys_enter_read) {
+        err = -errno;
+        warn("failed to attach sys_enter_read program: %s\n", strerror(-err));
+        return -1;
+    }
+
+    obj->links.sys_exit_read = bpf_program__attach(obj->progs.sys_exit_read);
+    if (!obj->links.sys_exit_read) {
+        err = -errno;
+        warn("failed to attach sys_exit_read program: %s\n", strerror(-err));
+        return -1;
+    }
+
+    return 0;
 }
 
 int main(int argc, char *argv[]) {
@@ -390,10 +425,7 @@ int main(int argc, char *argv[]) {
         goto cleanup_obj;
     }
 
-    obj->links.sys_write = bpf_program__attach(obj->progs.sys_write);
-    if (!obj->links.sys_write) {
-        err = -errno;
-        warn("failed to attach sys_write program: %s\n", strerror(-err));
+    if (attach_programs(obj) < 0) {
         goto cleanup_obj;
     }
 

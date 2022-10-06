@@ -15,6 +15,13 @@ const volatile int filter_fd = 0;
 size_t dropped = 0;
 
 struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, struct syscall_data);
+} syscall_data SEC(".maps");
+
+struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 4096 * 64);
 } buffer SEC(".maps");
@@ -36,39 +43,44 @@ static long submit_events(u32 index, struct loop_data *ctx) {
         bpf_printk("Failed reserving a slot in the buffer");
         ++dropped;
         return 1;
-    } else {
-        size_t dtmp = dropped;
-        if (dtmp > 0) {
-            event->count = dtmp;
-            event->len = -2;
-            event->off = 0;
-            dropped = 0;
-            bpf_ringbuf_submit(event, 0);
-            return 1;
-        }
+    }
+
+    size_t dtmp = dropped;
+    if (dtmp > 0) {
+        event->syscall = 0;
+        event->count = dtmp;
+        event->len = -2;
+        event->off = 0;
+        dropped = 0;
+        bpf_ringbuf_submit(event, 0);
+        return 1;
     }
 
     int ret = bpf_probe_read_user(event->buf, len, ctx->user_buf + off);
     if (ret != 0) {
         bpf_printk("Failed reading user string");
-        bpf_ringbuf_discard(event, 0);
-        ++dropped;
+
+        event->syscall = ctx->syscall;
+        event->count = 1;
+        event->len = -2;
+        event->off = 0;
+
+        bpf_ringbuf_submit(event, 0);
         return 1;
     } else {
+        event->syscall = ctx->syscall;
         event->count = ctx->count - off;
         event->fd = ctx->fd;
         event->len = len;
         event->off = off;
-        bpf_ringbuf_submit(event, 0);
-    }
 
-    return 0;
+        bpf_ringbuf_submit(event, 0);
+        return 0;
+    }
 }
 
-/* FIXME: we should do this on exit_write, because we
- * do not know how many characters were actually written */
 SEC("tracepoint/syscalls/sys_enter_write")
-int sys_write(struct trace_event_raw_sys_enter *ctx) {
+int sys_enter_write(struct trace_event_raw_sys_enter *ctx) {
     pid_t pid = bpf_get_current_pid_tgid() >> 32;
     pid_t req_pid = filter_pid;
 
@@ -76,31 +88,81 @@ int sys_write(struct trace_event_raw_sys_enter *ctx) {
         return 0;
     }
 
-    int fd = ctx->args[0];
-    if (filter_fd > 0 && fd != filter_fd) {
+    struct syscall_data data = { .fd = ctx->args[0],
+                                 .count = ctx->args[2],
+                                 .buf = (void *)ctx->args[1]
+                               };
+    if (bpf_map_update_elem(&syscall_data, &pid, &data, BPF_ANY) != 0) {
+        bpf_printk("sys_enter_write: failed updating data about syscall");
         return 0;
     }
 
-    size_t count = ctx->args[2];
-    if (count == 0)
+    return 0;
+}
+
+
+SEC("tracepoint/syscalls/sys_exit_write")
+int sys_exit_write(struct trace_event_raw_sys_exit *ctx) {
+    pid_t pid = bpf_get_current_pid_tgid() >> 32;
+    pid_t req_pid = filter_pid;
+
+    if (req_pid > 0 && pid != req_pid) {
+        return 0;
+    }
+
+    struct syscall_data *data = bpf_map_lookup_elem(&syscall_data, &pid);
+    if (!data) {
+        bpf_printk("sys_exit_write: failed looking up the data about syscall");
+        return 0;
+    }
+
+    if (data->count == 0)
         return 0;
 
-    const char *user_buf = (void *)ctx->args[1];
+    /* FIXME: allow arbitrary fds */
+    int filt_fd = filter_fd;
+    int fd = data->fd;
+    if (fd > 2 || (filt_fd > 0 && fd != filt_fd)) {
+        return 0;
+    }
 
-    /* bpf_printk("[PID %d] write(%d, %p, %lu).\n", pid, fd, user_buf, count); */
+    int ret = ctx->ret;
+    if (ret <= 0)
+        return 0;
 
-    struct loop_data data = { .syscall = SYSCALL_WRITE,
-                              .fd = fd,
-                              .count = count,
-                              .user_buf = user_buf};
+    struct loop_data loop_data = { .syscall = SYSCALL_WRITE,
+                                   .fd = data->fd,
+                                   .count = ret,
+                                   .user_buf = data->buf};
 
-    bpf_loop((count / BUF_SIZE) + 1, submit_events, &data, 0);
+    bpf_loop((ret / BUF_SIZE) + 1, submit_events, &loop_data, 0);
+
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_read")
+int sys_enter_read(struct trace_event_raw_sys_enter *ctx) {
+    pid_t pid = bpf_get_current_pid_tgid() >> 32;
+    pid_t req_pid = filter_pid;
+
+    if (req_pid > 0 && pid != req_pid) {
+        return 0;
+    }
+
+    struct syscall_data data = { .fd = ctx->args[0],
+                                 .count = ctx->args[2],
+                                 .buf = (void *)ctx->args[1]
+                               };
+    if (bpf_map_update_elem(&syscall_data, &pid, &data, BPF_ANY) != 0) {
+        bpf_printk("sys_enter_read: failed updating data about syscall");
+        return 0;
+    }
 
     return 0;
 }
 
 SEC("tracepoint/syscalls/sys_exit_read")
-int sys_read(struct trace_event_raw_sys_exit *ctx) {
+int sys_exit_read(struct trace_event_raw_sys_exit *ctx) {
     pid_t pid = bpf_get_current_pid_tgid() >> 32;
     pid_t req_pid = filter_pid;
 
@@ -108,25 +170,32 @@ int sys_read(struct trace_event_raw_sys_exit *ctx) {
         return 0;
     }
 
-    int fd = ctx->args[0];
-    if (filter_fd > 0 && fd != filter_fd) {
+    struct syscall_data *data = bpf_map_lookup_elem(&syscall_data, &pid);
+    if (!data) {
+        bpf_printk("sys_exit_read: failed looking up the data about syscall");
         return 0;
     }
 
-    size_t count = ctx->args[2];
-    if (count == 0)
+    if (data->count == 0)
         return 0;
 
-    const char *user_buf = (void *)ctx->args[1];
+    /* FIXME: allow arbitrary fds */
+    int fd = data->fd;
+    int filt_fd = filter_fd;
+    if (fd > 2 || (filt_fd > 0 && fd != filt_fd)) {
+        return 0;
+    }
 
-    /* bpf_printk("[PID %d] write(%d, %p, %lu).\n", pid, fd, user_buf, count); */
+    int ret = ctx->ret;
+    if (ret <= 0)
+        return 0;
 
-    struct loop_data data = { .syscall = SYSCALL_READ,
-                              .fd = fd,
-                              .count = count,
-                              .user_buf = user_buf};
+    struct loop_data loop_data = { .syscall = SYSCALL_READ,
+                                   .fd = data->fd,
+                                   .count = ret,
+                                   .user_buf = data->buf};
 
-    bpf_loop((count / BUF_SIZE) + 1, submit_events, &data, 0);
+    bpf_loop((ret / BUF_SIZE) + 1, submit_events, &loop_data, 0);
 
     return 0;
 }
