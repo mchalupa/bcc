@@ -196,8 +196,10 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
             e->fd, e->len, e->off, e->count, e->len, e->buf);
 	    */
 
-    int fd = e->fd;
+    const int fd = e->fd;
 
+    /* FIXME: user temporary variables, do not access via 'fd' all the time
+     * (although a good compiler could optimize this) */
     for (size_t i = 0; i < e->len; ++i) {
         if (current_line_idx[fd] >= current_line_alloc_len[fd]) {
             current_line_alloc_len[fd] += line_alloc_size(e->len);
