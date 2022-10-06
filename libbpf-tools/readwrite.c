@@ -240,9 +240,65 @@ int parse_args(int argc, char *argv[]) {
 
 static const int CAN_CONTINUE = 0xbee;
 
+static
+pid_t spawn_program(int argc, char *argv[], int fork_sync[2],
+                    int prog_args_idx, mode_t old_mask) {
+    pid_t filter_pid;
+    if (pipe(fork_sync) < 0) {
+        perror("pipe");
+        return -1;
+    }
+
+    if (signal(SIGCHLD, sig_chld) == SIG_ERR) {
+        warn("can't set SIGCHLD handler: %s\n", strerror(errno));
+        return -1;
+    }
+
+    filter_pid = fork();
+    if (filter_pid < 0) {
+        perror("fork");
+        return -1;
+    }
+
+    if (filter_pid == 0) { /* child */
+        /* reset back the umask */
+        umask(old_mask);
+
+        close(fork_sync[1]);
+        int val = 0;
+        while (val != CAN_CONTINUE) {
+            if (read(fork_sync[0], &val, sizeof(int)) < 0) {
+                perror("syncing child process");
+                exit(1);
+            }
+        }
+        char **nargv = malloc((argc - prog_args_idx) + 1);
+        assert(nargv && "Allocation failed");
+        int n = 0;
+        for (int i = prog_args_idx; i < argc; ++i) {
+            warn("  spawn arg %d: %s\n", n, argv[i]);
+            nargv[n++] = strdup(argv[i]);
+            assert(nargv[n - 1] && "Allocation failed");
+        }
+        nargv[n] = 0;
+
+        if (execve(argv[prog_args_idx], nargv, NULL) < 0) {
+            perror("execve");
+            warn("\033[31mFailed spawning the program...\033[0m\n");
+            exit(1);
+        }
+        assert(0 && "Unreachable after execve");
+    }
+
+    warn("Spawned pid %d\n", filter_pid);
+
+    close(fork_sync[0]);
+    return filter_pid;
+}
+
 int main(int argc, char *argv[]) {
-    int prog_idx = parse_args(argc, argv);
-    if (prog_idx < 0 || exprs_num == 0) {
+    int prog_args_idx = parse_args(argc, argv);
+    if (prog_args_idx < 0 || exprs_num == 0) {
         usage_and_exit(1);
     }
 
@@ -289,63 +345,19 @@ int main(int argc, char *argv[]) {
 
     pid_t filter_pid = 0;
     int fork_sync[2] = {-1, -1};
-    if (strncmp(argv[prog_idx], "-p", 3) == 0) {
-        if (argc <= prog_idx + 1) {
+    if (strncmp(argv[prog_args_idx], "-p", 3) == 0) {
+        if (argc <= prog_args_idx + 1) {
             usage_and_exit(1);
         }
-        if ((filter_pid = atoi(argv[prog_idx + 1])) < 0) {
+        if ((filter_pid = atoi(argv[prog_args_idx + 1])) < 0) {
             usage_and_exit(1);
         }
     } else { /* spawn the program */
-        if (pipe(fork_sync) < 0) {
-            perror("pipe");
-            exit(1);
+        filter_pid = spawn_program(argc, argv, fork_sync,
+                                   prog_args_idx, old_mask);
+        if (filter_pid == -1) {
+            goto cleanup_shm;
         }
-
-        if (signal(SIGCHLD, sig_chld) == SIG_ERR) {
-            warn("can't set SIGCHLD handler: %s\n", strerror(errno));
-            goto cleanup_core;
-        }
-
-        filter_pid = fork();
-        if (filter_pid < 0) {
-            perror("fork");
-            exit(1);
-        }
-
-        if (filter_pid == 0) { /* child */
-            /* reset back the umask */
-            umask(old_mask);
-
-            close(fork_sync[1]);
-            int val = 0;
-            while (val != CAN_CONTINUE) {
-                if (read(fork_sync[0], &val, sizeof(int)) < 0) {
-                    perror("syncing child process");
-                    exit(1);
-                }
-            }
-            char **nargv = malloc((argc - prog_idx) + 1);
-            assert(nargv && "Allocation failed");
-            int n = 0;
-            for (int i = prog_idx; i < argc; ++i) {
-                warn("  spawn arg %d: %s\n", n, argv[i]);
-                nargv[n++] = strdup(argv[i]);
-                assert(nargv[n - 1] && "Allocation failed");
-            }
-            nargv[n] = 0;
-
-            if (execve(argv[prog_idx], nargv, NULL) < 0) {
-                perror("execve");
-                warn("\033[31mFailed spawning the program...\033[0m\n");
-                exit(1);
-            }
-            assert(0 && "Unreachable after execve");
-        }
-
-        warn("Spawned pid %d\n", filter_pid);
-
-        close(fork_sync[0]);
     }
 
     LIBBPF_OPTS(bpf_object_open_opts, open_opts);
@@ -434,7 +446,7 @@ cleanup_obj:
     readwrite_bpf__destroy(obj);
 cleanup_core:
     cleanup_core_btf(&open_opts);
-
+cleanup_shm:
     warn("info: sent %lu events, busy waited on buffer %lu cycles\n", ev.id,
          waiting_for_buffer);
     for (int i = 0; i < (int)exprs_num; ++i) {
