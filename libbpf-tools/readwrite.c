@@ -567,10 +567,17 @@ int main(int argc, char *argv[]) {
     }
 
     info("Entering the main loop...\n");
+    size_t spinned = 0;
     while (running && child_running) {
         err = ring_buffer__consume(buffer);
-        // err = ring_buffer__poll(buffer,
-        //                         100 /* timeout in ms */);
+        if (err == 0) {
+            if (++spinned > 1000) {
+                err = ring_buffer__poll(buffer, 10 /* timeout in ms */);
+            }
+        }
+        if (err > 0)
+            spinned = 0;
+
         if (err < 0 && err != -EINTR) {
             perror("polling");
         }
