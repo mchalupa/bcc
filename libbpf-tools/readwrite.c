@@ -19,10 +19,11 @@
 #include "shamon/shmbuf/buffer.h"
 #include "shamon/shmbuf/client.h"
 
-#define warn(...) fprintf(stderr, __VA_ARGS__)
+#define warn(...) fprintf(stderr, "warning: " __VA_ARGS__)
+#define info(...) fprintf(stderr, __VA_ARGS__)
 
 static void usage_and_exit(int ret) {
-    warn("Usage: readwrite shmkey event-name regex sig [event-name regex sig] ... "
+    info("Usage: readwrite shmkey event-name regex sig [event-name regex sig] ... "
          " -- [program arg1 arg2 ... | -p PID]\n");
     exit(ret);
 }
@@ -119,7 +120,7 @@ static void parse_line(const struct event *e, char *line) {
             }
             if (*o != 'M') {
                 if ((int)matches[m].rm_so < 0) {
-                    warn("warning: have no match for '%c' in signature %s\n",
+                    warn("have no match for '%c' in signature %s\n",
                          *o, signatures[fd][i]);
                     continue;
                 }
@@ -261,7 +262,7 @@ int parse_args(int argc, char *argv[],
         /* compile the regex, use extended RE */
         int status = regcomp(&re[cur_fd][arg_i], exprs[cur_fd][arg_i], REG_EXTENDED);
         if (status != 0) {
-            warn("Failed compiling regex '%s'\n", exprs[cur_fd][arg_i]);
+            warn("failed compiling regex '%s'\n", exprs[cur_fd][arg_i]);
             for (unsigned tmp = 0; tmp < arg_i; ++tmp) {
                 regfree(&re[cur_fd][tmp]);
             }
@@ -308,7 +309,7 @@ int get_exprs_num(int argc, char *argv[]) {
         ++exprs_num[cur_fd];
         i += 2; /* skip regex and signature */
         if (i >= argc) {
-            warn("Invalid number of arguments");
+            warn("invalid number of arguments");
             return -1;
         }
     }
@@ -354,7 +355,7 @@ pid_t spawn_program(int argc, char *argv[], int fork_sync[2],
         assert(nargv && "Allocation failed");
         int n = 0;
         for (int i = prog_args_idx; i < argc; ++i) {
-            warn("  spawn arg %d: %s\n", n, argv[i]);
+            info("  spawn arg %d: %s\n", n, argv[i]);
             nargv[n++] = strdup(argv[i]);
             assert(nargv[n - 1] && "Allocation failed");
         }
@@ -362,13 +363,13 @@ pid_t spawn_program(int argc, char *argv[], int fork_sync[2],
 
         if (execve(argv[prog_args_idx], nargv, NULL) < 0) {
             perror("execve");
-            warn("\033[31mFailed spawning the program...\033[0m\n");
+            info("\033[31mFailed spawning the program...\033[0m\n");
             exit(1);
         }
         assert(0 && "Unreachable after execve");
     }
 
-    warn("Spawned pid %d\n", filter_pid);
+    info("Spawned pid %d\n", filter_pid);
 
     close(fork_sync[0]);
     return filter_pid;
@@ -445,9 +446,16 @@ int main(int argc, char *argv[]) {
     /* FIXME: still does not work with aux buffers... */
     mode_t old_mask = umask(0020);
     char extended_shmkey[256];
+    int filter_fd_mask = 0;
 
     /* Create shared memory buffers */
     for (int i = 0; i < 3; ++i) {
+        if (exprs_num[i] == 0) {
+            /* we DONT want to get data from this fd from eBPF */
+            filter_fd_mask |= (1 << i);
+            continue;
+        }
+
         /* Initialize the info about this source */
         struct source_control *control = source_control_define_pairwise(
             exprs_num[i], (const char **)names[i], (const char **)signatures[i]);
@@ -507,8 +515,10 @@ int main(int argc, char *argv[]) {
         goto cleanup_core;
     }
 
+    info("eBPF: tracing pid %d, fd mask: %d\n", filter_pid, filter_fd_mask);
     if (filter_pid > 0)
         obj->rodata->filter_pid = filter_pid;
+    obj->rodata->filter_fd_mask = filter_fd_mask;
 
     err = readwrite_bpf__load(obj);
     if (err) {
@@ -527,15 +537,19 @@ int main(int argc, char *argv[]) {
         goto cleanup_obj;
     }
 
-    warn("info: waiting for the monitor to attach... ");
-    err = buffer_wait_for_monitor(shmbuf[0]);
-    if (err < 0) {
-        if (err != EINTR) {
-            warn("failed waiting: %s\n", strerror(-err));
+    info("waiting for the monitor to attach... ");
+    for (int i = 0; i < 3; ++i) {
+        if (shmbuf[i] == NULL)
+            continue;
+        err = buffer_wait_for_monitor(shmbuf[i]);
+        if (err < 0) {
+            if (err != EINTR) {
+                warn("failed waiting: %s\n", strerror(-err));
+            }
+            goto cleanup_obj;
         }
-        goto cleanup_obj;
     }
-    warn("done\n");
+    info("done\n");
 
     if (signal(SIGINT, sig_int) == SIG_ERR) {
         warn("can't set signal handler: %s\n", strerror(errno));
@@ -543,7 +557,7 @@ int main(int argc, char *argv[]) {
     }
 
     /* we spawned the process, signal it to run */
-    warn("Signaling spawned process to continue\n");
+    info("signaling spawned process to continue\n");
     if (fork_sync[1] != -1) {
         if (write(fork_sync[1], &CAN_CONTINUE, sizeof(CAN_CONTINUE)) !=
             sizeof(CAN_CONTINUE)) {
@@ -552,7 +566,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    printf("Tracing write syscalls...\n");
+    info("Entering the main loop...\n");
     while (running && child_running) {
         err = ring_buffer__consume(buffer);
         // err = ring_buffer__poll(buffer,
@@ -562,7 +576,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    printf("Cleaning up...\n");
+    info("Cleaning up...\n");
     ring_buffer__free(buffer);
 
 cleanup_obj:
@@ -570,9 +584,8 @@ cleanup_obj:
 cleanup_core:
     cleanup_core_btf(&open_opts);
 cleanup_shm:
-    warn("Destroying shared buffers\n");
     for (unsigned fd = 0; fd < 3; ++fd) {
-        warn("[fd %d] info: sent %lu events, busy waited on buffer %lu cycles\n",
+        info("[fd %d] info: sent %lu events, busy waited on buffer %lu cycles\n",
              fd, evs[fd].id, waiting_for_buffer[fd]);
         for (int i = 0; i < (int)exprs_num[fd]; ++i) {
             regfree(&re[fd][i]);
@@ -582,7 +595,9 @@ cleanup_shm:
         free(signatures[fd]);
         free(re[fd]);
 
-        destroy_shared_buffer(shmbuf[fd]);
+        if (shmbuf[fd]) {
+            destroy_shared_buffer(shmbuf[fd]);
+        }
     }
 
     free(tmpline);

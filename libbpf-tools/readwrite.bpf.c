@@ -11,7 +11,7 @@
 #include <bpf/bpf_tracing.h>
 
 const volatile pid_t filter_pid = 0;
-const volatile int filter_fd = 0;
+const volatile int filter_fd_mask = 0;
 size_t dropped = 0;
 
 struct {
@@ -120,9 +120,9 @@ int sys_exit_write(struct trace_event_raw_sys_exit *ctx) {
         return 0;
 
     /* FIXME: allow arbitrary fds */
-    int filt_fd = filter_fd;
+    int filt_fd = filter_fd_mask;
     int fd = data->fd;
-    if (fd > 2 || (filt_fd > 0 && fd != filt_fd)) {
+    if (fd > 2 || ((1U << fd) & filt_fd)) {
         return 0;
     }
 
@@ -181,8 +181,8 @@ int sys_exit_read(struct trace_event_raw_sys_exit *ctx) {
 
     /* FIXME: allow arbitrary fds */
     int fd = data->fd;
-    int filt_fd = filter_fd;
-    if (fd > 2 || (filt_fd > 0 && fd != filt_fd)) {
+    int filt_fd = filter_fd_mask;
+    if (fd > 2 || ((1U << fd) & filt_fd)) {
         return 0;
     }
 
